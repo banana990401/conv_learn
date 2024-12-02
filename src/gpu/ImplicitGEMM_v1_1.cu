@@ -10,9 +10,9 @@ __global__ void implgemm(param_t param)
     int ty = threadIdx.y;
     int bx = blockIdx.x;
     int by = blockIdx.y;
-    int x = bx * 16 + tx;
-    int y = by * 16 + ty;
-    int z = blockIdx.z;
+    int x  = bx * 16 + tx;
+    int y  = by * 16 + ty;
+    int z  = blockIdx.z;
 
     __shared__ float smem_input[16][16];
     __shared__ float smem_weight[16][16];
@@ -25,16 +25,16 @@ __global__ void implgemm(param_t param)
 
     float sum = 0.0;
 
-    int in_offset = z * param.c * param.h * param.w;
-    int weight_offset = y * param.c * param.r * param.s;
-    int in_channel_offset = param.h * param.w;
+    int in_offset             = z * param.c * param.h * param.w;
+    int weight_offset         = y * param.c * param.r * param.s;
+    int in_channel_offset     = param.h * param.w;
     int weight_channel_offset = param.r * param.s;
-    int weight_k_offset = param.c * param.r * param.s;
+    int weight_k_offset       = param.c * param.r * param.s;
 
     for(int i = 0; i < param.c * param.r * param.s; i += 16)
     {
         int weight_offset_tmp = i + tx;
-        smem_weight[ty][tx] = param.weight[weight_offset + weight_offset_tmp];
+        smem_weight[ty][tx]   = param.weight[weight_offset + weight_offset_tmp];
 
         int cur_c = (i + ty) / (param.r * param.s);
         int cur_r = ((i + ty) % (param.r * param.s)) / param.s;
@@ -42,11 +42,11 @@ __global__ void implgemm(param_t param)
         int cur_h = pos_h + cur_r;
         int cur_w = pos_w + cur_s;
 
-        int in_offset_tmp = cur_c * in_channel_offset + cur_h * param.w + cur_w;
+        int in_offset_tmp  = cur_c * in_channel_offset + cur_h * param.w + cur_w;
         smem_input[ty][tx] = param.input[in_offset + in_offset_tmp];
         __syncthreads();
 
-        #pragma unroll
+#pragma unroll
         for(int subcrs = 0; subcrs < 16; subcrs++)
         {
             if(cur_h >= 0 && cur_w >= 0 && cur_h < param.h && cur_w < param.w)
