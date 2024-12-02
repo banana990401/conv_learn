@@ -18,34 +18,44 @@ void direct_conv2dcpu(float* input,
                       int P,
                       int Q)
 {
+    // 计算输出的高度和宽度
     int Oh = (H + 2 * P - R) / U + 1;
     int Ow = (W + 2 * Q - S) / V + 1;
 
+    // 对每个输入样本进行卷积操作
     for(int n = 0; n < N; n++)
     {
+        // 对每个输出通道进行卷积操作
         for(int k = 0; k < K; k++)
         {
+            // 对输出特征图的每个位置进行卷积操作
             for(int oh = 0; oh < Oh; oh++)
             {
                 for(int ow = 0; ow < Ow; ow++)
                 {
                     float sum = 0.0;
+                    // 对每个输入通道进行卷积操作
                     for(int c = 0; c < C; c++)
                     {
+                        // 对卷积核的每个位置进行卷积操作
                         for(int r = 0; r < R; r++)
                         {
                             for(int s = 0; s < S; s++)
                             {
+                                // 计算当前卷积位置在输入特征图上的对应位置
                                 int ih = oh * U - P + r;
                                 int iw = ow * V - Q + s;
+                                // 如果当前位置在输入特征图内，则进行卷积计算
                                 if(iw >= 0 && ih >= 0 && iw < W && ih < H)
                                 {
+                                    // 计算卷积和
                                     sum += (input[n * C * H * W + c * (W * H) + ih * W + iw] *
                                             filter[k * R * S * C + c * R * S + r * S + s]);
                                 }
                             }
                         }
                     }
+                    // 将卷积结果加上偏置值，存储到输出特征图中
                     output[n * K * Oh * Ow + k * Oh * Ow + oh * Ow + ow] = sum + bias[k];
                 }
             }
@@ -53,9 +63,9 @@ void direct_conv2dcpu(float* input,
     }
 }
 
+
 int main()
 {
-    // Example parameters
     unsigned int n = 1;
     unsigned int c = 1;
     unsigned int h = 4;
@@ -65,8 +75,8 @@ int main()
     unsigned int s = 3;
     unsigned int u = 1;
     unsigned int v = 1;
-    unsigned int p = 1;
-    unsigned int q = 1;
+    unsigned int p = 0;
+    unsigned int q = 0;
 
     int outh = (h + 2 * p - r) / u + 1;
     int outw = (w + 2 * q - s) / v + 1;

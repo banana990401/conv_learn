@@ -1,7 +1,7 @@
 float getPrecision(float tmp)
 {
     int tmpInt = (int)tmp;
-    float eNum = 1.0e-6;
+    float eNum = 1.0e-5;
     if(abs(tmpInt) > 0)
     {
         while(tmpInt != 0)
