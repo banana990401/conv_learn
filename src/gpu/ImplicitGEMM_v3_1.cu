@@ -7,75 +7,142 @@
 
 __global__ void implgemm(param_t param)
 {
-    uint32_t tx = threadIdx.x % 16; //线程在共享内存中的列索引
-    uint32_t ty = threadIdx.x / 16;
+    uint32_t tx = threadIdx.x;
     int bx      = blockIdx.x;
     int by      = blockIdx.y;
 
     // warp tile
-    const uint32_t lane_id   = threadIdx.x % 32; //线程在当前warp中的位置
-    const uint32_t warp_id   = threadIdx.x / 32;
-    const uint32_t mma_tid_x = lane_id % 8; //warp中每8个连续线程会被分配到同一行
-    const uint32_t mma_tid_y = lane_id / 8; 
+    const uint32_t lane_id   = tx % 32;
+    const uint32_t warp_id   = tx / 32;
+    const uint32_t mma_tid_x = lane_id % 8;
+    const uint32_t mma_tid_y = lane_id / 8;
     // lds addr
-    uint32_t weight_lds_addr = (warp_id / 2) * 4 + mma_tid_y; //当前共享内存行向量
-    uint32_t input_lds_addr  = (warp_id % 2) * 8 + mma_tid_x;
-    // stg addr
-    int x = bx * 16 + input_lds_addr;
-    int y = by * 16 + weight_lds_addr;
+    uint32_t weight_lds_addr = (warp_id / 2) * 32 + mma_tid_y * 4;
+    uint32_t input_lds_addr  = (warp_id % 2) * 64 + mma_tid_x * 4;
+
+    int x = bx * 128 + input_lds_addr;
+    int y = by * 128 + weight_lds_addr;
     int z = blockIdx.z;
 
-    __shared__ float smem_input[16][16];
-    __shared__ float smem_weight[16][16];
+    __shared__ float smem_input[8 * 128];
+    __shared__ float smem_weight[8 * 128];
 
-    int pos_oh = (bx * 16 + tx) / param.Ow;
-    int pos_ow = (bx * 16 + tx) % param.Ow;
-
-    int pos_h = pos_oh * param.u - param.p;
-    int pos_w = pos_ow * param.v - param.q;
-
-    float sum = 0.0f;
+    int pos_h[4], pos_w[4];
+#pragma unroll
+    for(int i = 0; i < 4; i++)
+    {
+        pos_h[i] = ((bx * 128 + tx % 32 + i * 32) / param.Ow) * param.u - param.p;
+        pos_w[i] = ((bx * 128 + tx % 32 + i * 32) % param.Ow) * param.v - param.q;
+    }
 
     int in_offset     = z * param.c * param.h * param.w;
-    int weight_offset = (by * 16 + ty) * param.c * param.r * param.s;
+    int weight_offset = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
 
     int in_channel_offset     = param.h * param.w;
     int weight_channel_offset = param.r * param.s;
+    int weight_k_offset       = param.c * param.r * param.s;
 
-    for(int i = 0; i < param.c * param.r * param.s; i += 16)
+    // sts addr(ld：取数据单元，st：存数据单元)
+    uint32_t weight_sts_addr = (tx % 8) * 128 + (tx / 8) * 4;
+    uint32_t input_sts_addr  = (tx / 32) * 128 + (tx % 32);
+
+    float output_frag[8][8];
+#pragma unroll
+    for(int i = 0; i < 8; i++)
     {
-        int weight_offset_tmp = i + tx;
-        smem_weight[ty][tx]   = param.weight[weight_offset + weight_offset_tmp];
-
-        int cur_c = (i + ty) / (param.r * param.s);
-        int cur_r = ((i + ty) % (param.r * param.s)) / param.s;
-        int cur_s = ((i + ty) % (param.r * param.s)) % param.s;
-        int cur_h = pos_h + cur_r;
-        int cur_w = pos_w + cur_s;
-
-        int in_offset_tmp = cur_c * in_channel_offset + cur_h * param.w + cur_w;
-        if(cur_h >= 0 && cur_w >= 0 && cur_h < param.h && cur_w < param.w)
+#pragma unroll
+        for(int j = 0; j < 8; j++)
         {
-            smem_input[ty][tx] = param.input[in_offset + in_offset_tmp];
+            output_frag[i][j] = 0;
         }
-        else
+    }
+
+    for(int crs = 0; crs < param.c * param.r * param.s; crs += 8)
+    {
+        int weight_offset_tmp = crs + tx % 8;
+#pragma unroll
+        for(int i = 0; i < 4; ++i)
         {
-            smem_input[ty][tx] = 0.0f;
+            smem_weight[weight_sts_addr + i] =
+                param.weight[weight_offset + weight_offset_tmp + i * weight_k_offset];
+        }
+
+        int cur_c = (crs + tx / 32) / (param.r * param.s);
+        int cur_r = ((crs + tx / 32) % (param.r * param.s)) / param.s;
+        int cur_s = ((crs + tx / 32) % (param.r * param.s)) % param.s;
+
+#pragma unroll
+        for(int i = 0; i < 4; ++i)
+        {
+            int cur_h         = pos_h[i] + cur_r; // input h
+            int cur_w         = pos_w[i] + cur_s; // input w
+            int in_offset_tmp = cur_c * in_channel_offset + cur_h * param.w + cur_w;
+            if(cur_h >= 0 && cur_w >= 0 && cur_w < param.w && cur_h < param.h)
+            {
+                smem_input[input_sts_addr + i * 32] = param.input[in_offset + in_offset_tmp];
+            }
+            else
+            {
+                smem_input[input_sts_addr + i * 32] = 0.0;
+            }
         }
         __syncthreads();
 
 #pragma unroll
-        for(int subcrs = 0; subcrs < 16; subcrs++)
+        for(int subcrs = 0; subcrs < 8; subcrs++)
         {
-            sum += smem_weight[weight_lds_addr][subcrs] * smem_input[subcrs][input_lds_addr];
+#pragma unroll
+            for(int i = 0; i < 4; i++)
+            {
+#pragma unroll
+                for(int j = 0; j < 4; j++)
+                {
+                    output_frag[i][j] += smem_weight[weight_lds_addr + subcrs * 128 + i] *
+                                         smem_input[input_lds_addr + subcrs * 128 + j];
+                    output_frag[i][j + 4] += smem_weight[weight_lds_addr + subcrs * 128 + i] *
+                                             smem_input[input_lds_addr + subcrs * 128 + j + 32];
+                    output_frag[i + 4][j] += smem_weight[weight_lds_addr + subcrs * 128 + i + 16] *
+                                             smem_input[input_lds_addr + subcrs * 128 + j];
+                    output_frag[i + 4][j + 4] +=
+                        smem_weight[weight_lds_addr + subcrs * 128 + i + 16] *
+                        smem_input[input_lds_addr + subcrs * 128 + j + 32];
+                }
+            }
         }
         __syncthreads();
     }
 
-    int out_offset = z * param.k * param.Oh * param.Ow + y * param.Oh * param.Ow + x;
-    if(x < param.Oh * param.Ow && y < param.k)
+    int out_offset;
+#pragma unroll
+    for(int i = 0; i < 4; i++)
     {
-        param.output[out_offset] = sum;
+#pragma unroll
+        for(int j = 0; j < 4; j++)
+        {
+            out_offset = z * param.k * param.Oh * param.Ow + (y + i) * param.Oh * param.Ow + x + j;
+            if(x + j < param.Oh * param.Ow && y + i < param.k)
+            {
+                param.output[out_offset] = output_frag[i][j];
+            }
+            out_offset =
+                z * param.k * param.Oh * param.Ow + (y + i) * param.Oh * param.Ow + x + j + 32;
+            if(x + j + 32 < param.Oh * param.Ow && y + i < param.k)
+            {
+                param.output[out_offset] = output_frag[i][j + 4];
+            }
+            out_offset =
+                z * param.k * param.Oh * param.Ow + (y + i + 16) * param.Oh * param.Ow + x + j;
+            if(x + j < param.Oh * param.Ow && y + i + 16 < param.k)
+            {
+                param.output[out_offset] = output_frag[i + 4][j];
+            }
+            out_offset =
+                z * param.k * param.Oh * param.Ow + (y + i + 16) * param.Oh * param.Ow + x + j + 32;
+            if(x + j + 32 < param.Oh * param.Ow && y + i + 16 < param.k)
+            {
+                param.output[out_offset] = output_frag[i + 4][j + 4];
+            }
+        }
     }
 }
 
@@ -99,8 +166,8 @@ void launch_implgemm(param_t param)
     param.Oh = out_h;
     param.Ow = out_w;
 
-    int block_x  = ((out_h * out_w + 15) / 16);
-    int block_y  = (k + 15) / 16;
+    int block_x  = ((out_h * out_w + 127) / 128);
+    int block_y  = (k + 127) / 128;
     int block_z  = n;
     int thread_x = 256;
     int thread_y = 1;
