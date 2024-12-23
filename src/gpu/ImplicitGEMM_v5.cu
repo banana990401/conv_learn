@@ -8,207 +8,219 @@
 __global__ void implgemm(param_t param)
 {
     __shared__ __align__(16 * 1024) char smem[24 * 1024];
-    float *smemweight = reinterpret_cast<float *>(smem);
-    float *smeminput = reinterpret_cast<float *>(smem + 16 * 1024);
+    float* smem_weight = reinterpret_cast<float*>(smem);
+    float* smem_input  = reinterpret_cast<float*>(smem + 16 * 1024);
 
     int tx = threadIdx.x;
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
-    // Warp tile
-    const int lane_id = threadIdx.x % 32;
-    const int warp_id = threadIdx.x / 32;
-    const int mma_tid_x = (lane_id / 2) % 8;
-    const int mma_tid_y = (lane_id / 16) * 2 + (lane_id % 2);
+    // warp tile
+    const int lane_id   = tx % 32;
+    const int warp_id   = tx / 32;
+    const int mma_tid_x = lane_id % 8;
+    const int mma_tid_y = lane_id / 8;
+
     // lds addr
     int weight_lds_addr = (warp_id / 2) * 32 + mma_tid_y * 4;
-    int input_lds_addr = (warp_id % 2) * 64 + mma_tid_x * 4;
+    int input_lds_addr  = (warp_id % 2) * 64 + mma_tid_x * 4;
 
-    int x = bx * 128 + input_lds_addr;
-    int y = by * 128 + weight_lds_addr;
     int z = blockIdx.z;
 
     float weight_ldg_reg[4];
     float input_ldg_reg[4];
-    // 当前线程处理的数据点在oh、ow上的坐标
-    int posh_ori[4];
-    int posw_ori[4];
+
+    int pos_h[4];
+    int pos_w[4];
+
 #pragma unroll
-    for (int i = 0; i < 4; ++i)
+    for(int i = 0; i < 4; i++)
     {
-        posh_ori[i] = ((bx * 128 + tx % 32 + i * 32) / param.Ow) * param.u - param.p;
-        posw_ori[i] = ((bx * 128 + tx % 32 + i * 32) % param.Ow) * param.v - param.q;
+        pos_h[i] = ((bx * 128 + tx % 32 + i * 32) / param.Ow) * param.u - param.p;
+        pos_w[i] = ((bx * 128 + tx % 32 + i * 32) % param.Ow) * param.v - param.q;
     }
 
-    int inOffset = z * param.c * param.h * param.w;
-    int weiOffset = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
-    int inChannelOffset = param.h * param.w;
-    int weightChannelOffset = param.r * param.s;
-    int weightKOffset = param.c * param.r * param.s;
+    int input_offset          = z * param.c * param.h * param.w;
+    int weight_offset         = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
+    int input_channel_offset  = param.h * param.w;
+    int weight_k_offset       = param.c * param.r * param.s;
 
     // sts addr
-    int weight_sts_addr = (tx % 8) * 132 +
-                          (tx / 8) * 4;
-    int input_sts_addr = (tx / 32) * 128 + (tx % 32);
+    int weight_sts_addr = (tx % 8) * 132 + (tx / 8) * 4;
+    int input_sts_addr  = (tx / 32) * 128 + (tx % 32);
 
     int write_flag = 1;
     float weight_frag[2][8];
     float input_frag[2][8];
     float output_frag[8][8];
 #pragma unroll
-    for (int i = 0; i < 8; ++i)
+    for(int i = 0; i < 8; i++)
     {
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for(int j = 0; j < 8; j++)
         {
-            output_frag[i][j] = 0;
+            output_frag[i][j] = 0.0f;
         }
     }
+
 // ldg
 #pragma unroll
-    for (int i = 0; i < 4; ++i)
+    for(int i = 0; i < 4; i++)
     {
-        if (tx % 8 < weightKOffset && by * 128 + tx / 8 * 4 + i < param.k)
+        if(tx % 8 < weight_k_offset && by * 128 + tx / 8 * 4 + i < param.k)
         {
-            weight_ldg_reg[i] = param.weight[weiOffset + tx % 8 + i * weightKOffset];
+            weight_ldg_reg[i] = param.weight[weight_offset + i * weight_k_offset + tx % 8];
         }
         else
         {
-            weight_ldg_reg[i] = 0.0;
+            weight_ldg_reg[i] = 0.0f;
         }
     }
-    int curC = (tx / 32) / (param.r * param.s);             // channel offset
-    int curR = ((tx / 32) % (param.r * param.s)) / param.s; // kernel r offset
-    int curS = ((tx / 32) % (param.r * param.s)) % param.s; // kernel s offset
+    int cur_c = (tx / 32) / (param.r * param.s);
+    int cur_r = ((tx / 32) % (param.r * param.s)) / param.s;
+    int cur_s = ((tx / 32) % (param.r * param.s)) % param.s;
 #pragma unroll
-    for (int i = 0; i < 4; ++i)
+    for(int i = 0; i < 4; i++)
     {
-        int curH = posh_ori[i] + curR; // input h
-        int curW = posw_ori[i] + curS; // input w
-        int inOffsetTmp = curC * inChannelOffset + curH * param.w + curW;
-        if (curH >= 0 && curW >= 0 && curW < param.w && curH < param.h)
+        int cur_h            = pos_h[i] + cur_r;
+        int cur_w            = pos_w[i] + cur_s;
+        int input_offset_tmp = cur_c * input_channel_offset + cur_h * param.w + cur_w;
+        if(cur_h >= 0 && cur_w >= 0 && cur_h < param.h && cur_w < param.w)
         {
-            input_ldg_reg[i] = param.input[inOffset + inOffsetTmp];
+            input_ldg_reg[i] = param.input[input_offset + input_offset_tmp];
         }
         else
         {
-            input_ldg_reg[i] = 0.0;
+            input_ldg_reg[i] = 0.0f;
         }
     }
-    // sts
-    for (int i = 0; i < 4; ++i)
+// sts
+#pragma unroll
+    for(int i = 0; i < 4; i++)
     {
-        smemweight[weight_sts_addr + i] = weight_ldg_reg[i];
+        smem_weight[weight_sts_addr + i] = weight_ldg_reg[i];
     }
-    for (int i = 0; i < 4; ++i)
+#pragma unroll
+    for(int i = 0; i < 4; i++)
     {
-        smeminput[input_sts_addr + i * 32] = input_ldg_reg[i];
+        smem_input[input_sts_addr + i * 32] = input_ldg_reg[i];
+    }
+    __syncthreads();
+
+// lds
+#pragma unroll
+    for(int i = 0; i < 4; i++)
+    {
+        weight_frag[0][i]     = smem_weight[weight_lds_addr + i];
+        weight_frag[0][i + 4] = smem_weight[weight_lds_addr + i + 16];
+    }
+#pragma unroll
+    for(int i = 0; i < 4; i++)
+    {
+        input_frag[0][i] = smem_input[input_lds_addr + i];
+        input_frag[0][i + 4] = smem_input[input_lds_addr + i + 32];
     }
 
-    __syncthreads();
-    // lds
-#pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        weight_frag[0][i] = smemweight[weight_lds_addr + i];
-        weight_frag[0][i + 4] = smemweight[weight_lds_addr + i + 16];
-    }
-#pragma unroll
-    for (int i = 0; i < 4; ++i)
-    {
-        input_frag[0][i] = smeminput[input_lds_addr + i];
-        input_frag[0][i + 4] = smeminput[input_lds_addr + i + 32];
-    }
-    for (int crs = 0; crs < param.r * param.s * param.c; crs += 8)
+    for(int crs = 0; crs < param.c * param.r * param.s; crs += 8)
     {
         // ldg
-        int weiOffsetTmp = crs + 8 + tx % 8;
+        int weight_offset_tmp = crs + 8 + tx % 8;
 #pragma unroll
-        for (int i = 0; i < 4; ++i)
+        for(int i = 0; i < 4; i++)
         {
-            if (weiOffsetTmp < weightKOffset && by * 128 + tx / 8 * 4 + i < param.k)
+            if(weight_offset_tmp < weight_k_offset && by * 128 + tx / 8 * 4 + i < param.k)
             {
-                weight_ldg_reg[i] = param.weight[weiOffset + weiOffsetTmp + i * weightKOffset];
+                weight_ldg_reg[i] =
+                    param.weight[weight_offset + weight_offset_tmp + i * weight_k_offset];
             }
             else
             {
-                weight_ldg_reg[i] = 0.0;
+                weight_ldg_reg[i] = 0.0f;
             }
         }
-        curC = (crs + 8 + tx / 32) / (param.r * param.s);             // channel offset
-        curR = ((crs + 8 + tx / 32) % (param.r * param.s)) / param.s; // kernel r offset
-        curS = ((crs + 8 + tx / 32) % (param.r * param.s)) % param.s; // kernel s offset
-
+        cur_c = (tx / 32 + crs + 8) / (param.r * param.s);
+        cur_r = ((tx / 32 + crs + 8) % (param.r * param.s)) / param.s;
+        cur_s = ((tx / 32 + crs + 8) % (param.r * param.s)) % param.s;
 #pragma unroll
-        for (int i = 0; i < 4; ++i)
+        for(int i = 0; i < 4; i++)
         {
-            int curH = posh_ori[i] + curR; // input h
-            int curW = posw_ori[i] + curS; // input w
-            int inOffsetTmp = curC * inChannelOffset + curH * param.w + curW;
-            if (curH >= 0 && curW >= 0 && curW < param.w && curH < param.h)
+            int cur_h            = pos_h[i] + cur_r;
+            int cur_w            = pos_w[i] + cur_s;
+            int input_offset_tmp = cur_c * input_channel_offset + cur_h * param.w + cur_w;
+            if(cur_h >= 0 && cur_w >= 0 && cur_h < param.h && cur_w < param.w)
             {
-                input_ldg_reg[i] = param.input[inOffset + inOffsetTmp];
+                input_ldg_reg[i] = param.input[input_offset + input_offset_tmp];
             }
             else
             {
-                input_ldg_reg[i] = 0.0;
+                input_ldg_reg[i] = 0.0f;
             }
         }
         int load_flag = write_flag ^ 1;
 #pragma unroll
-        for (int subcrs = 0; subcrs < 8 - 1; ++subcrs)
+        for(int subcrs = 0; subcrs < 8 - 1; subcrs++)
         {
+// lds
 #pragma unroll
-            for (int i = 0; i < 4; ++i)
+            for(int i = 0; i < 4; i++)
             {
-                weight_frag[(subcrs + 1) % 2][i] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i];
-                weight_frag[(subcrs + 1) % 2][i + 4] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i + 16];
+                weight_frag[(subcrs + 1) % 2][i] =
+                    smem_weight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i];
+                weight_frag[(subcrs + 1) % 2][i + 4] =
+                    smem_weight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i +
+                                16];
             }
 #pragma unroll
-            for (int i = 0; i < 4; ++i)
+            for(int i = 0; i < 4; i++)
             {
-                input_frag[(subcrs + 1) % 2][i] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i];
-                input_frag[(subcrs + 1) % 2][i + 4] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i + 32];
+                input_frag[(subcrs + 1) % 2][i] =
+                    smem_input[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i];
+                input_frag[(subcrs + 1) % 2][i + 4] =
+                    smem_input[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i + 32];
             }
-
+// GEMM
 #pragma unroll
-            for (int i = 0; i < 8; ++i)
+            for(int i = 0; i < 8; i++)
             {
 #pragma unroll
-                for (int j = 0; j < 8; ++j)
+                for(int j = 0; j < 8; j++)
                 {
                     output_frag[i][j] += weight_frag[subcrs % 2][i] * input_frag[subcrs % 2][j];
                 }
             }
         }
-        // sts
-        for (int i = 0; i < 4; ++i)
+// sts
+#pragma unroll
+        for(int i = 0; i < 4; i++)
         {
-            smemweight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
+            smem_weight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
         }
-        for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for(int i = 0; i < 4; i++)
         {
-            smeminput[write_flag * 128 * 8 + input_sts_addr + i * 32] = input_ldg_reg[i];
+            smem_input[write_flag * 128 * 8 + input_sts_addr + i * 32] = input_ldg_reg[i];
         }
         __syncthreads();
+
         write_flag ^= 1;
+// lds
 #pragma unroll
-        for (int i = 0; i < 4; ++i)
+        for(int i = 0; i < 4; i++)
         {
-            weight_frag[0][i] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
-            weight_frag[0][i + 4] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
+            weight_frag[0][i] = smem_weight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
+            weight_frag[0][i + 4] =
+                smem_weight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
         }
 #pragma unroll
-        for (int i = 0; i < 4; ++i)
+        for(int i = 0; i < 4; i++)
         {
-            input_frag[0][i] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i];
-            input_frag[0][i + 4] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i + 32];
+            input_frag[0][i]     = smem_input[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i];
+            input_frag[0][i + 4] = smem_input[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i + 32];
         }
-#pragma unroll
-        for (int i = 0; i < 8; ++i)
+        // GEMM
+        for(int i = 0; i < 8; i++)
         {
-#pragma unroll
-            for (int j = 0; j < 8; ++j)
+            for(int j = 0; j < 8; j++)
             {
                 output_frag[i][j] += weight_frag[1][i] * input_frag[1][j];
             }
@@ -216,47 +228,49 @@ __global__ void implgemm(param_t param)
     }
 
     // reuse smem
-    float *smemoutput = reinterpret_cast<float *>(smem);
-    float *smembias = reinterpret_cast<float *>(smem + 16 * 1024);
+    float* smem_output = reinterpret_cast<float*>(smem);
+    float* smem_bias   = reinterpret_cast<float*>(smem + 16 * 1024);
 
     // bias ldg/sts
-    if (tx < 128)
+    if(tx < 128)
     {
-        smembias[tx] = param.bias[by * 128 + tx];
+        smem_bias[tx] = param.bias[by * 128 + tx];
     }
 
     uint32_t output_sts_addr = warp_id * 512 + mma_tid_y * 4 * 8 * 4 + mma_tid_x * 4;
     uint32_t output_lds_addr = warp_id * 512 + lane_id;
 
-    uint32_t m_idx = blockIdx.y * 128 + warp_id / 2 * 32;
-    uint32_t n_idx = blockIdx.x * 128 + warp_id % 2 * 64 + lane_id;
+    uint32_t m_idx = by * 128 + (warp_id / 2) * 32;
+    uint32_t n_idx = bx * 128 + (warp_id % 2) * 64 + lane_id;
 
 #pragma unroll
-    for (int i = 0; i < 2; ++i)
+    for(int i = 0; i < 2; i++)
     {
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for(int j = 0; j < 2; j++)
         {
             __syncthreads();
-
 #pragma unroll
-            for (int subi = 0; subi < 4; ++subi)
+            for(int subi = 0; subi < 4; subi++)
             {
 #pragma unroll
-                for (int subj = 0; subj < 4; ++subj)
+                for(int subj = 0; subj < 4; subj++)
                 {
-                    // output sts
-                    smemoutput[output_sts_addr + subi * 8 * 4 + subj] = output_frag[i * 4 + subi][j * 4 + subj];
+                    smem_output[output_sts_addr + subi * 8 * 4 + subj] =
+                        output_frag[i * 4 + subi][j * 4 + subj];
                 }
             }
             __syncthreads();
 
 #pragma unroll
-            for (int subk = 0; subk < 16; ++subk)
+            for(int k = 0; k < 16; k++)
             {
-                int outOffset = z * param.k * param.Oh * param.Ow + (m_idx + i * 16 + subk) * param.Oh * param.Ow + n_idx + j * 32;
-                if ((m_idx + i * 16 + subk) < param.k && (n_idx + j * 32) < param.Oh * param.Ow)
-                    param.output[outOffset] = smemoutput[output_lds_addr + subk * 32] + smembias[m_idx + i * 16 + subk];
+                int out_offset = z * param.k * param.Oh * param.Ow +
+                                 (m_idx + i * 16 + k) * param.Oh * param.Ow + n_idx + j * 32;
+                if((m_idx + i * 16 + k) < param.k && (n_idx + j * 32) < param.Oh * param.Ow)
+                {
+                    param.output[out_offset] = smem_output[output_lds_addr + k * 32] + smem_bias[m_idx + i * 16 + k];
+                }
             }
         }
     }
@@ -342,7 +356,7 @@ int main(int argc, char** argv)
 
     for(int i = 0; i < k; i++)
     {
-        bias[i] = 0.0f;
+        bias[i] = (rand() % 255) / 255.0;
     }
 
     for(int i = 0; i < n * k * out_h * out_w; i++)
