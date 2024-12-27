@@ -40,10 +40,10 @@ __global__ void implgemm(param_t param)
         pos_w[i] = ((bx * 128 + tx % 32 + i * 32) % param.Ow) * param.v - param.q;
     }
 
-    int input_offset          = z * param.c * param.h * param.w;
-    int weight_offset         = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
-    int input_channel_offset  = param.h * param.w;
-    int weight_k_offset       = param.c * param.r * param.s;
+    int input_offset         = z * param.c * param.h * param.w;
+    int weight_offset        = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
+    int input_channel_offset = param.h * param.w;
+    int weight_k_offset      = param.c * param.r * param.s;
 
     // sts addr
     int weight_sts_addr = (tx % 8) * 132 + (tx / 8) * 4;
@@ -117,7 +117,7 @@ __global__ void implgemm(param_t param)
 #pragma unroll
     for(int i = 0; i < 4; i++)
     {
-        input_frag[0][i] = smem_input[input_lds_addr + i];
+        input_frag[0][i]     = smem_input[input_lds_addr + i];
         input_frag[0][i + 4] = smem_input[input_lds_addr + i + 32];
     }
 
@@ -269,7 +269,8 @@ __global__ void implgemm(param_t param)
                                  (m_idx + i * 16 + k) * param.Oh * param.Ow + n_idx + j * 32;
                 if((m_idx + i * 16 + k) < param.k && (n_idx + j * 32) < param.Oh * param.Ow)
                 {
-                    param.output[out_offset] = smem_output[output_lds_addr + k * 32] + smem_bias[m_idx + i * 16 + k];
+                    param.output[out_offset] = smem_output[output_lds_addr + k * 32] +
+                                               smem_bias[(warp_id / 2) * 32 + i * 16 + k];
                 }
             }
         }
