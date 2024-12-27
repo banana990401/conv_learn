@@ -25,6 +25,8 @@ __global__ void implgemm(param_t param)
     int weight_lds_addr = (warp_id / 2) * 32 + mma_tid_y * 4;
     int input_lds_addr  = (warp_id % 2) * 64 + mma_tid_x * 4;
 
+    int x = bx * 128 + input_lds_addr;
+    int y = by * 128 + weight_lds_addr;
     int z = blockIdx.z;
 
     float weight_ldg_reg[4];
@@ -40,10 +42,11 @@ __global__ void implgemm(param_t param)
         pos_w[i] = ((bx * 128 + tx % 32 + i * 32) % param.Ow) * param.v - param.q;
     }
 
-    int input_offset         = z * param.c * param.h * param.w;
-    int weight_offset        = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
-    int input_channel_offset = param.h * param.w;
-    int weight_k_offset      = param.c * param.r * param.s;
+    int input_offset          = z * param.c * param.h * param.w;
+    int weight_offset         = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
+    int input_channel_offset  = param.h * param.w;
+    int weight_channel_offset = param.r * param.s;
+    int weight_k_offset       = param.c * param.r * param.s;
 
     // sts addr
     int weight_sts_addr = (tx % 8) * 132 + (tx / 8) * 4;
@@ -156,7 +159,7 @@ __global__ void implgemm(param_t param)
                 input_ldg_reg[i] = 0.0f;
             }
         }
-        int load_flag = write_flag ^ 1;
+        int load_flag = write_flag ^ 1; // 0
 #pragma unroll
         for(int subcrs = 0; subcrs < 8 - 1; subcrs++)
         {
@@ -202,7 +205,7 @@ __global__ void implgemm(param_t param)
         }
         __syncthreads();
 
-        write_flag ^= 1;
+        write_flag ^= 1; // 0
 // lds
 #pragma unroll
         for(int i = 0; i < 4; i++)
@@ -228,7 +231,7 @@ __global__ void implgemm(param_t param)
     }
 
     // reuse smem
-    float* smem_output = reinterpret_cast<float*>(smem);
+    float* smem_output = reinterpret_cast<float*>(smem); // 4096
     float* smem_bias   = reinterpret_cast<float*>(smem + 16 * 1024);
 
     // bias ldg/sts
