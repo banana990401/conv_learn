@@ -58,7 +58,6 @@ __global__ void implgemm(param_t param)
 void launch_implgemm(param_t param)
 {
     unsigned int n = param.n;
-    unsigned int c = param.c;
     unsigned int h = param.h;
     unsigned int w = param.w;
     unsigned int k = param.k;

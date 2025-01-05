@@ -40,7 +40,6 @@ __global__ void implgemm(param_t param)
     int weight_offset = (by * 16 + ty) * param.c * param.r * param.s;
 
     int in_channel_offset     = param.h * param.w;
-    int weight_channel_offset = param.r * param.s;
 
     for(int i = 0; i < param.c * param.r * param.s; i += 16)
     {
@@ -82,7 +81,6 @@ __global__ void implgemm(param_t param)
 void launch_implgemm(param_t param)
 {
     unsigned int n = param.n;
-    unsigned int c = param.c;
     unsigned int h = param.h;
     unsigned int w = param.w;
     unsigned int k = param.k;

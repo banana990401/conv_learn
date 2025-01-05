@@ -25,8 +25,6 @@ __global__ void implgemm(param_t param)
     int weight_lds_addr = (warp_id / 2) * 32 + mma_tid_y * 4;
     int input_lds_addr  = (warp_id % 2) * 64 + mma_tid_x * 4;
 
-    int x = bx * 128 + input_lds_addr;
-    int y = by * 128 + weight_lds_addr;
     int z = blockIdx.z;
 
     float weight_ldg_reg[4];
@@ -45,7 +43,6 @@ __global__ void implgemm(param_t param)
     int input_offset          = z * param.c * param.h * param.w;
     int weight_offset         = (by * 128 + tx / 8 * 4) * param.c * param.r * param.s;
     int input_channel_offset  = param.h * param.w;
-    int weight_channel_offset = param.r * param.s;
     int weight_k_offset       = param.c * param.r * param.s;
 
     // sts addr
@@ -283,7 +280,6 @@ __global__ void implgemm(param_t param)
 void launch_implgemm(param_t param)
 {
     unsigned int n = param.n;
-    unsigned int c = param.c;
     unsigned int h = param.h;
     unsigned int w = param.w;
     unsigned int k = param.k;

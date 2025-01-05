@@ -37,7 +37,6 @@ __global__ void implgemm(param_t param)
     int weight_offset = (by * 64 + tx / 4) * param.c * param.r * param.s;
 
     int in_channel_offset     = param.h * param.w;
-    int weight_channel_offset = param.r * param.s;
 
     // sts addr(ld：取数据单元，st：存数据单元)
     uint32_t weight_sts_addr = (tx % 4) * 64 + (tx / 4);
@@ -111,7 +110,6 @@ __global__ void implgemm(param_t param)
 void launch_implgemm(param_t param)
 {
     unsigned int n = param.n;
-    unsigned int c = param.c;
     unsigned int h = param.h;
     unsigned int w = param.w;
     unsigned int k = param.k;
