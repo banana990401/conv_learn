@@ -1,3 +1,5 @@
+include_directories(../../include)
+
 add_executable(v0 ImplicitGEMM_v0.cu)
 add_executable(v1_0 ImplicitGEMM_v1_0.cu)
 add_executable(v1_1 ImplicitGEMM_v1_1.cu)

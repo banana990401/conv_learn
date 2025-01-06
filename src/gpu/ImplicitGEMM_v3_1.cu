@@ -2,8 +2,8 @@
 #include <cstdlib>
 #include <stdio.h>
 #include <cuda_runtime.h>
-#include "../../include/verify.h"
-#include "../../include/conv_2d.h"
+#include "verify.h"
+#include "conv_2d.h"
 
 __global__ void implgemm(param_t param)
 {
